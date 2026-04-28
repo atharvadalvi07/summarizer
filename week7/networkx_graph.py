@@ -2,57 +2,81 @@ import json
 import pickle
 import networkx as nx
 import matplotlib.pyplot as plt
-from collections import Counter
+from collections import Counter, defaultdict
 from itertools import combinations
+from pathlib import Path
 
 
 
-def load_entities(filepath="cleaned_entities.json"):
+def _normalize_to_doc_entity_list(raw: list) -> list[dict]:
     """
-    Load cleaned & deduplicated entities from Week 6 output.
-    Expected format:
-    [
-      {
-        "doc_id": "arxiv_001",
-        "entities": [
-          {"text": "BERT", "label": "METHOD"},
-          {"text": "NLP", "label": "TASK"},
-          ...
+    Convert Week 6 output to doc-grouped format expected by build_knowledge_graph.
+
+    Shape A — flat canonical list (new schema):
+        [{"text": "BERT", "label": "METHOD", "source_doc": "paper_1", ...}, ...]
+
+    Shape B — doc-grouped list (original expected format):
+        [{"doc_id": "paper_1", "entities": [{"text": "BERT", ...}]}, ...]
+
+    Shape C — top-level dict keyed by doc_id:
+        {"paper_1": [{"text": "BERT", ...}], ...}
+    """
+    if not raw:
+        return []
+
+    #Shape C
+    if isinstance(raw, dict):
+        return [
+            {"doc_id": doc_id, "entities": ents}
+            for doc_id, ents in raw.items()
+            if isinstance(ents, list)
         ]
-      },
-      ...
-    ]
-    """
+
+    #Shape B
+    if isinstance(raw[0], dict) and "entities" in raw[0]:
+        return raw
+
+    #Shape A
+    groups = defaultdict(list)
+    for ent in raw:
+        doc_id = ent.get("source_doc") or ent.get("doc_id") or "unknown"
+        text   = ent.get("text") or ent.get("entity") or ent.get("word") or ""
+        label  = ent.get("label") or ent.get("entity_type") or ent.get("type") or "UNKNOWN"
+        if text.strip():
+            groups[doc_id].append({"text": text, "label": label})
+
+    return [{"doc_id": doc_id, "entities": ents} for doc_id, ents in groups.items()]
+
+
+def load_entities(filepath="cleaned_entities.json") -> list:
     with open(filepath, "r") as f:
         return json.load(f)
 
-def build_knowledge_graph(entity_data):
+
+def build_knowledge_graph(entity_data: list[dict]) -> nx.Graph:
     """
-    Construct a NetworkX graph where:
-      - Nodes  = unique entities (text + label)
-      - Edges  = co-occurrence within the same document
-      - Weight = number of documents the pair co-occurs in
+    Nodes  = unique entities (text + label)
+    Edges  = co-occurrence within the same document
+    Weight = number of documents the pair co-occurs in
     """
     G = nx.Graph()
-
-    cooccurrence = Counter()
+    cooccurrence: Counter = Counter()
 
     for doc in entity_data:
-        doc_id = doc["doc_id"]
-        entities = doc["entities"]
+        entities = doc.get("entities", [])
 
         for ent in entities:
-            node_id = ent["text"].lower()          
+            node_id = ent["text"].lower()
             if not G.has_node(node_id):
                 G.add_node(node_id,
-                           label=ent["label"],
+                           label=ent.get("label", "UNKNOWN"),
                            display=ent["text"],
                            frequency=0)
-            G.nodes[node_id]["frequency"] += 1    
-        
+            G.nodes[node_id]["frequency"] += 1
+
         unique_texts = list({e["text"].lower() for e in entities})
         for a, b in combinations(unique_texts, 2):
-            cooccurrence[(a, b)] += 1
+            cooccurrence[(min(a, b), max(a, b))] += 1
 
     for (a, b), weight in cooccurrence.items():
         if G.has_node(a) and G.has_node(b):
@@ -61,73 +85,60 @@ def build_knowledge_graph(entity_data):
     return G
 
 
-
-
-
-
-
-
-def compute_metrics(G):
-    """
-    Compute structural metrics aligned with the evaluation strategy (§5.2).
-    Returns a dict of metric values.
-    """
+def compute_metrics(G: nx.Graph) -> dict:
     metrics = {}
 
-   
     metrics["num_nodes"] = G.number_of_nodes()
     metrics["num_edges"] = G.number_of_edges()
+    metrics["density"]   = round(nx.density(G), 6)
 
-    
-    metrics["density"] = round(nx.density(G), 6)
-
-    
     degrees = [d for _, d in G.degree()]
-    metrics["avg_degree"]    = round(sum(degrees) / len(degrees), 4) if degrees else 0
-    metrics["max_degree"]    = max(degrees) if degrees else 0
-    metrics["min_degree"]    = min(degrees) if degrees else 0
+    metrics["avg_degree"] = round(sum(degrees) / len(degrees), 4) if degrees else 0
+    metrics["max_degree"] = max(degrees) if degrees else 0
+    metrics["min_degree"] = min(degrees) if degrees else 0
     metrics["avg_clustering_coefficient"] = round(nx.average_clustering(G), 6)
-
 
     components = list(nx.connected_components(G))
     metrics["num_connected_components"] = len(components)
     metrics["largest_component_size"]   = max(len(c) for c in components)
 
-
     largest_cc = G.subgraph(max(components, key=len)).copy()
     metrics["giant_component_density"]  = round(nx.density(largest_cc), 6)
-    metrics["giant_component_diameter"] = nx.diameter(largest_cc) if nx.is_connected(largest_cc) else None
+    metrics["giant_component_diameter"] = (
+        nx.diameter(largest_cc) if nx.is_connected(largest_cc) else None
+    )
 
     degree_centrality = nx.degree_centrality(G)
-    top_nodes = sorted(degree_centrality.items(), key=lambda x: x[1], reverse=True)[:10]
-    metrics["top_nodes_by_degree_centrality"] = top_nodes
+    metrics["top_nodes_by_degree_centrality"] = sorted(
+        degree_centrality.items(), key=lambda x: x[1], reverse=True
+    )[:10]
 
     betweenness = nx.betweenness_centrality(G, normalized=True)
-    top_between = sorted(betweenness.items(), key=lambda x: x[1], reverse=True)[:10]
-    metrics["top_nodes_by_betweenness"] = top_between
+    metrics["top_nodes_by_betweenness"] = sorted(
+        betweenness.items(), key=lambda x: x[1], reverse=True
+    )[:10]
 
     return metrics
 
 
-def save_graph(G, path="knowledge_graph.pkl"):
-    """Persist graph object for downstream use (Week 8+)."""
+def save_graph(G: nx.Graph, path="knowledge_graph.pkl"):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
         pickle.dump(G, f)
     print(f"Graph saved → {path}")
 
 
-def save_metrics_report(metrics, path="graph_metrics_report.json"):
-    """Save metrics as JSON for the week's deliverable."""
+def save_metrics_report(metrics: dict, path="graph_metrics_report.json"):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         json.dump(metrics, f, indent=2)
     print(f"Metrics report saved → {path}")
 
 
-def print_metrics_report(metrics):
-    """Pretty-print metrics to console."""
-    print("\n" + "="*50)
+def print_metrics_report(metrics: dict):
+    print("\n" + "=" * 50)
     print("       KNOWLEDGE GRAPH — METRICS REPORT")
-    print("="*50)
+    print("=" * 50)
     print(f"  Nodes                     : {metrics['num_nodes']}")
     print(f"  Edges                     : {metrics['num_edges']}")
     print(f"  Graph Density             : {metrics['density']}")
@@ -143,15 +154,12 @@ def print_metrics_report(metrics):
     print("\n  Top 10 Nodes (Betweenness Centrality):")
     for node, score in metrics["top_nodes_by_betweenness"]:
         print(f"    {node:<30} {score:.4f}")
-    print("="*50 + "\n")
+    print("=" * 50 + "\n")
 
-def visualize_graph(G, top_n=50, output_path="graph_preview.png"):
-    """
-    Draw the top-N nodes by degree for a quick sanity-check plot.
-    Full interactive visualisation is handled in Week 10 (PyVis/D3.js).
-    """
+
+def visualize_graph(G: nx.Graph, top_n=50, output_path="graph_preview.png"):
     top_nodes = sorted(G.degree(), key=lambda x: x[1], reverse=True)[:top_n]
-    subgraph = G.subgraph([n for n, _ in top_nodes])
+    subgraph  = G.subgraph([n for n, _ in top_nodes])
 
     label_colors = {
         "METHOD":      "#4C8BE2",
@@ -160,11 +168,7 @@ def visualize_graph(G, top_n=50, output_path="graph_preview.png"):
         "INSTITUTION": "#C46DE2",
         "TECHNIQUE":   "#E2C44C",
     }
-    node_colors = [
-        label_colors.get(subgraph.nodes[n].get("label", ""), "#AAAAAA")
-        for n in subgraph.nodes()
-    ]
-
+    node_colors  = [label_colors.get(subgraph.nodes[n].get("label", ""), "#AAAAAA") for n in subgraph.nodes()]
     edge_weights = [subgraph[u][v].get("weight", 1) for u, v in subgraph.edges()]
 
     plt.figure(figsize=(14, 10))
@@ -176,38 +180,32 @@ def visualize_graph(G, top_n=50, output_path="graph_preview.png"):
         font_size=8,
         width=[0.5 + w * 0.5 for w in edge_weights],
         alpha=0.85,
-        edge_color="#CCCCCC"
+        edge_color="#CCCCCC",
     )
     plt.title(f"Knowledge Graph Preview (top {top_n} nodes by degree)", fontsize=14)
     plt.axis("off")
     plt.tight_layout()
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_path, dpi=150)
     plt.close()
     print(f"Graph preview saved → {output_path}")
 
 
 
+# for run_all.py
 
+def run_graph_construction(
+    entities_path: str,
+    graph_pkl: str,
+    metrics_path: str,
+    viz_path: str,
+):
+    """Called by run_all.py → run_week7()."""
+    print(f"Loading entities from '{entities_path}' ...")
+    raw         = load_entities(entities_path)
+    entity_data = _normalize_to_doc_entity_list(raw)
+    print(f"  → {len(entity_data)} documents")
 
-
-
-
-
-
-
-
-
-
-
-if __name__ == "__main__":
-    import os
-
-    if os.path.exists("cleaned_entities.json"):
-        print("Loading entity data from cleaned_entities.json ...")
-        entity_data = load_entities("cleaned_entities.json")
-    else:
-        print("cleaned_entities.json not found")
-    
     print("Building knowledge graph ...")
     G = build_knowledge_graph(entity_data)
 
@@ -215,8 +213,23 @@ if __name__ == "__main__":
     metrics = compute_metrics(G)
     print_metrics_report(metrics)
 
-    save_graph(G, "knowledge_graph.pkl")
-    save_metrics_report(metrics, "graph_metrics_report.json")
-    visualize_graph(G, top_n=40, output_path="graph_preview.png")
-
+    save_graph(G, graph_pkl)
+    save_metrics_report(metrics, metrics_path)
+    visualize_graph(G, top_n=40, output_path=viz_path)
     print("Week 7 complete ✓")
+
+
+# Standalone run
+if __name__ == "__main__":
+    import os
+    src = "cleaned_entities.json"
+    if not os.path.exists(src):
+        print(f"{src} not found — exiting.")
+    else:
+        run_graph_construction(
+            entities_path=src,
+            graph_pkl="knowledge_graph.pkl",
+            metrics_path="graph_metrics_report.json",
+            viz_path="graph_preview.png",
+        )
+

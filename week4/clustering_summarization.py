@@ -72,11 +72,29 @@ def strategy_individual_merge(papers: list[dict], summarizer) -> str:
     final = summarizer(merged, max_length=150, min_length=40, do_sample=False, truncation=True)
     return final[0]["summary_text"]
 
+def truncate_to_tokens(text: str, tokenizer, max_tokens: int = 1024):
+    tokens = tokenizer.encode(text, truncation=True, max_length=max_tokens)
+    return tokenizer.decode(tokens, skip_special_tokens=True)
 
 def strategy_joint(papers: list[dict], summarizer) -> str:
-    combined = truncate_to_words(" ".join(p["abstract_clean"] for p in papers), max_words=900)
-    out = summarizer(combined, max_length=150, min_length=40, do_sample=False, truncation=True)
+    tokenizer = summarizer.tokenizer
+
+    combined = " ".join(p["abstract_clean"] for p in papers)
+    combined = truncate_to_tokens(combined, tokenizer, max_tokens=1024)
+
+    out = summarizer(
+        combined,
+        max_length=150,
+        min_length=40,
+        do_sample=False,
+        truncation=True
+    )
     return out[0]["summary_text"]
+
+# def strategy_joint(papers: list[dict], summarizer) -> str:
+#     combined = truncate_to_words(" ".join(p["abstract_clean"] for p in papers), max_words=900)
+#     out = summarizer(combined, max_length=150, min_length=40, do_sample=False, truncation=True)
+#     return out[0]["summary_text"]
 
 
 @dataclass
@@ -128,7 +146,13 @@ def run_clustering_evaluation(cleaned_path: str, output_path: str, n_clusters: i
         cluster_papers = [papers[i] for i, m in enumerate(mask) if m]
         print(f"\n--- Cluster {cid} ({len(cluster_papers)} papers) ---")
 
-        reference = truncate_to_words(" ".join(p["abstract_clean"] for p in cluster_papers), 1000)
+        # reference = truncate_to_words(" ".join(p["abstract_clean"] for p in cluster_papers), 1000)
+        tokenizer = summarizer.tokenizer
+        
+        reference = truncate_to_tokens(
+            " ".join(p["abstract_clean"] for p in cluster_papers),
+            tokenizer,
+            max_tokens=512)
 
         print("  Running individual-merge strategy...")
         ind_summary = strategy_individual_merge(cluster_papers, summarizer)
